@@ -25,6 +25,9 @@ class MouseController:
         self.right_gesture_active = False
         self.commands_enabled = True
         self.mode_toggle_armed = False
+        self.exit_requested = False
+        self.exit_gesture_started_at = None
+        self.exit_gesture_hold_seconds = 0.8
         self.edge_margin = 1
         self.smoothing = 0.35
         self.input_margin_ratio_x = 0.22
@@ -108,6 +111,45 @@ class MouseController:
         mcp = hand_landmarks[mcp_index]
         return tip.y < pip.y < mcp.y
 
+    def is_exit_gesture(self, hand_landmarks):
+        middle_extended = self.is_finger_extended(hand_landmarks, 12, 10, 9)
+        index_folded = not self.is_finger_extended(hand_landmarks, 8, 6, 5)
+        ring_folded = not self.is_finger_extended(hand_landmarks, 16, 14, 13)
+        pinky_folded = not self.is_finger_extended(hand_landmarks, 20, 18, 17)
+
+        middle_tip = hand_landmarks[12]
+        index_tip = hand_landmarks[8]
+        ring_tip = hand_landmarks[16]
+        pinky_tip = hand_landmarks[20]
+        middle_is_highest = (
+            middle_tip.y < index_tip.y
+            and middle_tip.y < ring_tip.y
+            and middle_tip.y < pinky_tip.y
+        )
+
+        return (
+            middle_extended
+            and index_folded
+            and ring_folded
+            and pinky_folded
+            and middle_is_highest
+        )
+
+    def update_exit_gesture(self, hand_landmarks):
+        if not self.is_exit_gesture(hand_landmarks):
+            self.exit_gesture_started_at = None
+            return False
+
+        current_time = time.monotonic()
+        if self.exit_gesture_started_at is None:
+            self.exit_gesture_started_at = current_time
+            return True
+
+        if current_time - self.exit_gesture_started_at >= self.exit_gesture_hold_seconds:
+            self.exit_requested = True
+
+        return True
+
     def classify_hand_state(self, hand_landmarks):
         finger_joints = (
             (8, 6, 5),
@@ -165,8 +207,14 @@ class MouseController:
             self.draw_hand_landmarks(frame, hand_landmarks)
             hand_state = self.classify_hand_state(hand_landmarks)
             mode_changed = self.update_command_mode(hand_state)
+            exit_gesture_active = self.update_exit_gesture(hand_landmarks)
 
-            if self.commands_enabled and not mode_changed:
+            if (
+                self.commands_enabled
+                and not mode_changed
+                and not exit_gesture_active
+                and not self.exit_requested
+            ):
                 normalized_x = self.normalize_with_margin(
                     hand_landmarks[8].x,
                     self.input_margin_ratio_x,
@@ -222,25 +270,8 @@ class MouseController:
             self.release_left_button()
             self.right_gesture_active = False
             self.mode_toggle_armed = False
+            self.exit_gesture_started_at = None
 
-        cv2.putText(
-            frame,
-            "",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (0, 255, 0),
-            2,
-        )
-        cv2.putText(
-            frame,
-            "",
-            (10, 60),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (0, 255, 0),
-            2,
-        )
         cv2.putText(
             frame,
             "Comandos: ATIVOS" if self.commands_enabled else "Comandos: PAUSADOS",
@@ -248,6 +279,30 @@ class MouseController:
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 0) if self.commands_enabled else (0, 0, 255),
+            2,
+        )
+        if self.exit_requested:
+            exit_text = "Saindo..."
+            exit_color = (0, 0, 255)
+        elif self.exit_gesture_started_at is not None:
+            remaining_time = max(
+                0.0,
+                self.exit_gesture_hold_seconds
+                - (time.monotonic() - self.exit_gesture_started_at),
+            )
+            exit_text = f"Fechando em {remaining_time:.1f}s"
+            exit_color = (0, 165, 255)
+        else:
+            exit_text = ""
+            exit_color = (255, 255, 0)
+
+        cv2.putText(
+            frame,
+            exit_text,
+            (10, 60),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            exit_color,
             2,
         )
         return frame
@@ -275,6 +330,9 @@ class MouseController:
                 frame = self.control_mouse(frame, timestamp_ms)
 
                 cv2.imshow("Controle de Mouse com a Mao", frame)
+
+                if self.exit_requested:
+                    break
 
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
